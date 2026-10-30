@@ -1,3 +1,13 @@
+require("dotenv").config();
+
+console.log("NODE_ENV:", process.env.NODE_ENV);
+console.log("ATLAS_URL loaded:", Boolean(process.env.ATLAS_URL));
+
+const dns = require("node:dns");
+dns.setServers(["8.8.8.8", "1.1.1.1"]);
+
+
+
 const express = require("express");
 const app = express();
 const mongoose = require("mongoose");
@@ -8,8 +18,20 @@ const ejsMate = require("ejs-mate");
 const wrapAsync = require("./utils/wrapAsync.js");
 const ExpressError = require("./utils/ExpressError.js");
 const {listingSchema} = require("./schema.js");
+const session = require("express-session");
+const MongoStore = require("connect-mongo").default;
+const flash = require("connect-flash");
+const passport = require("passport");
+const LocalStrategy = require("passport-local");
+const User = require("./models/user.js");
+
+const listingRouter = require("./routes/listing.js");
+const reviewRouter = require("./routes/review.js");
+const userRouter = require("./routes/user.js");
 
 const MONGO_URL = "mongodb://127.0.0.1:27017/wanderlust";
+
+const dbUrl = process.env.ATLAS_URL;
 
 main()
    .then(()=>{
@@ -19,7 +41,9 @@ main()
        console.log(err);
    });
 async function main(){
-    await mongoose.connect(MONGO_URL);
+    
+    await mongoose.connect(dbUrl);
+    console.log("connected to db");
 }
 
 app.set("view engine" , "ejs");
@@ -29,103 +53,61 @@ app.use(methodOverride("_method"));
 app.engine("ejs",ejsMate);
 app.use(express.static(path.join(__dirname,"/public")));
 
-app.get("/",(req,res)=>{
-    res.send("Hii , I am root");
+
+const store = MongoStore.create({
+    mongoUrl :dbUrl,
+    crypto:{
+        secret:process.env.SECRET,
+    },
+    touchAfter:24 * 3600,
 });
 
-//validate function
-const validateListing = (req, res , next)=>{
-    let {error} = listingSchema.validate(req.body);
-    if(error){
-        let errMsg = error.details.map((el)=> el.message).join(",");
-        throw new ExpressError(400, errMsg);
-    }else{
-        next();
-    }
-}
-
-//Index route
-app.get("/listings",wrapAsync(async (req,res)=>{
-    const allListings = await Listing.find({});
-    res.render("listings/index.ejs",{allListings});
-    
-}));
-
-//New Route
-app.get("/listings/new",(req,res)=>{
-    res.render("listings/new.ejs");
+store.on("error",(err)=>{
+    console.log("ERROR in MONGO SESSION STORE",err);
 });
 
-//Show route
-app.get("/listings/:id",wrapAsync(async (req,res)=>{
+const sessionOptions = {
+    store,
+    secret: process.env.SECRET,
     
-    let {id} = req.params;
-    const listing = await Listing.findById(id);
-    res.render("listings/show.ejs",{ listing });
-}));
-
-//create route
-app.post(
-    "/listings" , 
-    validateListing,
-    wrapAsync(async (req,res) => {
-    //let { title , description , image , price , country , location } = req.body;
-        // if(!req.body.listing){
-        //    throw new ExpressError(400,"Send valid data for listing");
-        // }
-        
-        let listing = req.body.listing ;
-        const newListing = new Listing(listing) ;
-        // if(!newListing.title){
-        //    throw new ExpressError(400,"Title is missing");
-        // }
-        // if(!newListing.description){
-        //    throw new ExpressError(400," Description is missing");
-        // }
-        // if(!newListing.country){
-        //    throw new ExpressError(400," Country is missing");
-        // }
-        // if(!newListing.location){
-        //    throw new ExpressError(400,"Location is missing");
-        // }
-        // if(!newListing.price){
-        //    throw new ExpressError(400,"Price is missing");
-        // }
-
-        await newListing.save();
-        res.redirect("/listings");
-    })
-);
-
-//Edit Route
-app.get("/listings/:id/edit", wrapAsync(async (req,res)=>{
-    
-    let {id} = req.params;
-    const listing = await Listing.findById(id);
-    res.render("listings/edit.ejs",{listing});
-    
-}));
-
-//update
-app.put("/listings/:id" , 
-    validateListing,
-    wrapAsync(async (req,res)=>{
-    
-    if(!req.body.listing){
-        throw new ExpressError(400,"Send valid data for listing");
+    resave:false, 
+    saveUninitialized: true,
+    cookie : {
+        expires : Date.now() + 7 * 24 *60*60 * 1000,
+        maxAge: 7 * 24 *60*60 * 1000,
+        httpOnly : true,
     }
-    let {id} = req.params;
-    await Listing.findByIdAndUpdate(id,{...req.body.listing});
-    res.redirect(`/listings/${id}`);
+};
 
-}));
+// app.get("/",(req,res)=>{
+//     res.send("Hii , I am root");
+// });
 
-//delete
-app.delete("/listings/:id" , wrapAsync(async (req ,res)=>{
-    let {id} = req.params;
-    let deletedListing = await Listing.findByIdAndDelete(id);
-    res.redirect("/listings");
-}));
+
+
+
+app.use(session(sessionOptions));
+app.use(flash());
+
+app.use(passport.initialize());
+app.use(passport.session());
+passport.use(new LocalStrategy(User.authenticate()));
+
+passport.serializeUser(User.serializeUser());
+passport.deserializeUser(User.deserializeUser());
+
+app.use((req,res,next)=>{
+   res.locals.success=req.flash("success");
+   res.locals.error=req.flash("error");
+   res.locals.currUser = req.user;
+   next();
+});
+
+
+
+app.use("/listings", listingRouter);
+app.use("/listings/:id/reviews",reviewRouter);
+app.use("/", userRouter);
 
 app.use((req,res,next)=>{
     next(new ExpressError(404,"Page Not Found!!"));
@@ -154,5 +136,15 @@ app.listen(8080,()=>{
 //     await sampleListing.save();
 //     console.log("sample was saved");
 //     res.send("succesful");
+// });
+
+
+// app.get("/demouser",async(req,res)=>{
+//     let fakeUser = new User({
+//         email: "student@gamil.com",
+//         username:"123"
+//     });
+//     let registeredUser = await User.register(fakeUser,"helloworld");
+//     res.send(registeredUser);
 // });
 
